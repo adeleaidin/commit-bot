@@ -12,6 +12,10 @@ def get_conn():
 
 
 def init_db():
+    """
+    Создаёт таблицы если их нет. Существующие данные не трогает.
+    Для новых колонок используй _run_migrations() ниже.
+    """
     with get_conn() as conn:
         conn.executescript("""
             CREATE TABLE IF NOT EXISTS users (
@@ -47,6 +51,34 @@ def init_db():
                 UNIQUE(user_id, callout_date)
             );
         """)
+    _run_migrations()
+
+
+def _run_migrations():
+    """
+    Безопасные миграции — добавляют новые колонки к существующим таблицам.
+    Никогда не удаляют данные. Запускается при каждом старте бота.
+
+    КАК ДОБАВИТЬ НОВУЮ КОЛОНКУ В БУДУЩЕМ:
+    Просто допиши строку в список migrations ниже, например:
+        ("users", "new_column", "ALTER TABLE users ADD COLUMN new_column INTEGER DEFAULT 0"),
+    При следующем деплое бот добавит колонку, существующие данные останутся нетронутыми.
+    """
+    migrations = [
+        # (таблица, колонка, SQL) — добавляется только если колонки ещё нет
+        # Пример для будущих обновлений:
+        # ("users", "coins", "ALTER TABLE users ADD COLUMN coins INTEGER DEFAULT 0"),
+    ]
+
+    with get_conn() as conn:
+        for table, column, sql in migrations:
+            # Проверяем есть ли колонка уже
+            existing = [
+                row[1] for row in
+                conn.execute(f"PRAGMA table_info({table})").fetchall()
+            ]
+            if column not in existing:
+                conn.execute(sql)
 
 
 RANK_THRESHOLDS = [

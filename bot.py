@@ -2,6 +2,7 @@
 Commit Club — Telegram MVP Bot v2
 """
 
+import asyncio
 import os
 import logging
 from datetime import time as dtime
@@ -91,6 +92,8 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         parse_mode=ParseMode.MARKDOWN,
     )
 
+    await asyncio.sleep(10)
+
     await update.message.reply_text(
         "⚙️ *Как это работает:*\n\n"
         "1️⃣ Ты ставишь одну цель на 60 дней\n"
@@ -103,6 +106,8 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "Это просто система, которая не даёт тебе забить на себя и свою цель.",
         parse_mode=ParseMode.MARKDOWN,
     )
+
+    await asyncio.sleep(10)
 
     await update.message.reply_text(
         "Готов? Напиши свою цель на 60 дней — одним предложением. Чем конкретнее — тем лучше.\n\n"
@@ -202,6 +207,10 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     user_id = user.id
     msg = update.message
+
+    # ── Игнорируем сообщения из групп — бот работает только в личке ───────
+    if msg.chat.type in ("group", "supergroup", "channel"):
+        return
 
     # ── Registration flow ──────────────────────────────────────────────────
     if user_id in REG_STATE:
