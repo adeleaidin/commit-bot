@@ -225,6 +225,22 @@ def get_user_profile(user_id: int) -> dict | None:
         }
 
 
+def update_user_name(user_id: int, new_name: str):
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE users SET display_name=? WHERE user_id=?",
+            (new_name, user_id)
+        )
+
+
+def update_user_goal(user_id: int, new_goal: str):
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE users SET goal=? WHERE user_id=?",
+            (new_goal, user_id)
+        )
+
+
 def get_users_without_report() -> list:
     today = date.today().isoformat()
     with get_conn() as conn:
