@@ -8,11 +8,12 @@ import os
 import logging
 from datetime import time as dtime
 
-from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
+from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import (
     Application,
     CommandHandler,
     MessageHandler,
+    CallbackQueryHandler,
     ContextTypes,
     filters,
 )
@@ -41,12 +42,17 @@ CALLOUT_CODE: dict = {"code": ""}
 MAIN_MENU = ReplyKeyboardMarkup(
     [
         [KeyboardButton("📝 Отчёт"), KeyboardButton("👤 Профиль")],
-        [KeyboardButton("🎯 Изменить цель"), KeyboardButton("✏️ Изменить имя")],
-        [KeyboardButton("📞 Отметиться на созвоне")],
     ],
     resize_keyboard=True,
     is_persistent=True,
 )
+
+PROFILE_INLINE = InlineKeyboardMarkup([
+    [
+        InlineKeyboardButton("🎯 Изменить цель", callback_data="action:setgoal"),
+        InlineKeyboardButton("✏️ Изменить имя",  callback_data="action:setname"),
+    ]
+])
 
 # ── HELPERS ───────────────────────────────────────────────────────────────────
 
@@ -204,25 +210,7 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if text == "👤 Профиль":
         p = db.get_user_profile(user_id)
-        await msg.reply_text(profile_text(p), parse_mode=ParseMode.MARKDOWN)
-        return
-
-    if text == "🎯 Изменить цель":
-        USER_STATE[user_id] = "setgoal"
-        await msg.reply_text(
-            f"Текущая цель: _{db_user['goal']}_\n\n"
-            "Напиши новую цель 👇",
-            parse_mode=ParseMode.MARKDOWN,
-        )
-        return
-
-    if text == "✏️ Изменить имя":
-        USER_STATE[user_id] = "setname"
-        await msg.reply_text(
-            f"Текущее имя: *{db_user['display_name']}*\n\n"
-            "Напиши новое имя 👇",
-            parse_mode=ParseMode.MARKDOWN,
-        )
+        await msg.reply_text(profile_text(p), parse_mode=ParseMode.MARKDOWN, reply_markup=PROFILE_INLINE)
         return
 
     if text == "📞 Отметиться на созвоне":
@@ -273,13 +261,23 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             )
 
         if GROUP_ID:
-            report_display = text if text else "📷 фото"
-            group_text = (
+            report_display = text if text else ""
+            group_caption = (
                 f"✅ *{result['display_name']}* {report_display}  ➕{result['xp_earned']} XP\n"
                 f"🎯 {result['goal']}  |  🔥 {result['streak']} дн. / {result['days_joined']} дн."
-            )
+            ).strip()
             try:
-                await ctx.bot.send_message(GROUP_ID, group_text, parse_mode=ParseMode.MARKDOWN)
+                if has_photo:
+                    # Берём лучшее качество фото (последний элемент списка)
+                    photo_id = msg.photo[-1].file_id
+                    await ctx.bot.send_photo(
+                        GROUP_ID,
+                        photo=photo_id,
+                        caption=group_caption,
+                        parse_mode=ParseMode.MARKDOWN,
+                    )
+                else:
+                    await ctx.bot.send_message(GROUP_ID, group_caption, parse_mode=ParseMode.MARKDOWN)
             except Exception as e:
                 logger.warning(f"Group post failed: {e}")
 
@@ -503,6 +501,36 @@ async def job_weekly_leaderboard(ctx: ContextTypes.DEFAULT_TYPE):
         logger.warning(f"Weekly leaderboard post failed: {e}")
 
 
+
+# ── INLINE CALLBACKS (профиль) ────────────────────────────────────────────────
+
+async def handle_inline_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    data = query.data
+
+    db_user = db.get_user(user_id)
+    if not db_user:
+        return
+
+    if data == "action:setgoal":
+        USER_STATE[user_id] = "setgoal"
+        await query.message.reply_text(
+            f"Текущая цель: _{db_user['goal']}_\n\n"
+            "Напиши новую цель 👇",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+
+    elif data == "action:setname":
+        USER_STATE[user_id] = "setname"
+        await query.message.reply_text(
+            f"Текущее имя: *{db_user['display_name']}*\n\n"
+            "Напиши новое имя 👇",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+
+
 # ── MAIN ──────────────────────────────────────────────────────────────────────
 
 def main():
@@ -518,6 +546,7 @@ def main():
     app.add_handler(CommandHandler("setcallout",  cmd_setcallout))
     app.add_handler(CommandHandler("remind",      cmd_remind))
     app.add_handler(CommandHandler("leaderboard", cmd_leaderboard))
+    app.add_handler(CallbackQueryHandler(handle_inline_callback))
     app.add_handler(MessageHandler(filters.TEXT | filters.PHOTO, handle_message))
 
     jq = app.job_queue
