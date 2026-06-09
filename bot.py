@@ -1,5 +1,6 @@
 """
-Commit Club — Telegram MVP Bot v2
+Commit Club — Telegram MVP Bot v10
+Логика: все действия через кнопки меню → режим ожидания → следующее сообщение обрабатывается
 """
 
 import asyncio
@@ -7,12 +8,11 @@ import os
 import logging
 from datetime import time as dtime
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 from telegram.ext import (
     Application,
     CommandHandler,
     MessageHandler,
-    CallbackQueryHandler,
     ContextTypes,
     filters,
 )
@@ -26,14 +26,29 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BOT_TOKEN  = os.environ.get("BOT_TOKEN", "")
-GROUP_ID   = int(os.environ.get("GROUP_ID", "0"))
-ADMIN_IDS  = [int(x) for x in os.environ.get("ADMIN_IDS", "").split(",") if x.strip()]
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
+GROUP_ID  = int(os.environ.get("GROUP_ID", "0"))
+ADMIN_IDS = [int(x) for x in os.environ.get("ADMIN_IDS", "").split(",") if x.strip()]
 
-REG_STATE: dict[int, dict] = {}
-CALLOUT_CODE: dict = {"code": ""}
+# ── СОСТОЯНИЯ ─────────────────────────────────────────────────────────────────
+# { user_id: "report" | "setgoal" | "setname" | "callout" | "reg_goal" }
+USER_STATE: dict[int, str] = {}
 
 RANK_EMOJI = {"E": "⬛", "D": "🟫", "C": "🟦", "B": "🟩", "A": "🟨", "S": "🟥"}
+CALLOUT_CODE: dict = {"code": ""}
+
+# ── КНОПКИ ────────────────────────────────────────────────────────────────────
+MAIN_MENU = ReplyKeyboardMarkup(
+    [
+        [KeyboardButton("📝 Отчёт"), KeyboardButton("👤 Профиль")],
+        [KeyboardButton("🎯 Изменить цель"), KeyboardButton("✏️ Изменить имя")],
+        [KeyboardButton("📞 Отметиться на созвоне")],
+    ],
+    resize_keyboard=True,
+    is_persistent=True,
+)
+
+# ── HELPERS ───────────────────────────────────────────────────────────────────
 
 def rank_badge(rank: str) -> str:
     return f"{RANK_EMOJI.get(rank, '⬛')} Ранг {rank}"
@@ -51,38 +66,40 @@ def profile_text(p: dict) -> str:
         f"👤 *{p['display_name']}*\n"
         f"🎯 Цель: _{p['goal']}_\n\n"
         f"{rank_badge(p['rank'])}\n"
-        f"⚡ {p['xp']} XP  |  🔮 {p['aura']} Aura\n"
+        f"⚡ {p['xp']} XP\n"
         f"🔥 Стрик: {p['streak']} дн.  |  Рекорд: {p['best_streak']} дн.\n"
         f"📋 Всего отчётов: {p['total_reports']}\n\n"
         f"Квест сегодня: {done}\n"
         f"_{xp_to_next(p['xp'], p['rank'])}_"
     )
 
-
 # ── /start ────────────────────────────────────────────────────────────────────
 
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     user_id = user.id
+
     existing = db.get_user(user_id)
     if existing:
+        USER_STATE.pop(user_id, None)
         await update.message.reply_text(
             f"Ты уже в системе, *{existing['display_name']}* 👊\n\n"
             f"Твой ранг: {rank_badge(existing['rank'])}\n"
-            "Используй /profile чтобы посмотреть прогресс.\n"
-            "Или сразу отправь сегодняшний отчёт — текстом или фото.",
+            "Используй меню ниже 👇",
             parse_mode=ParseMode.MARKDOWN,
+            reply_markup=MAIN_MENU,
         )
         return
 
-    # Имя берём из Telegram-профиля: имя + фамилия, или только имя, или username
+    # Имя из Telegram-профиля
     first = (user.first_name or "").strip()
-    last = (user.last_name or "").strip()
+    last  = (user.last_name or "").strip()
     display_name = f"{first} {last}".strip() if last else first
     if not display_name:
         display_name = user.username or "Игрок"
 
-    REG_STATE[user_id] = {"step": "goal", "name": display_name}
+    ctx.user_data["reg_name"] = display_name
+    USER_STATE[user_id] = "reg_goal"
 
     await update.message.reply_text(
         "⚡ *Система обнаружила тебя.*\n\n"
@@ -90,9 +107,10 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "Здесь нет мотивационных постов. Нет теории. Только одно правило:\n\n"
         "*Каждый день — одно действие к своей цели. И отчёт боту.*",
         parse_mode=ParseMode.MARKDOWN,
+        reply_markup=ReplyKeyboardRemove(),
     )
 
-    await asyncio.sleep(10)
+    await asyncio.sleep(3)
 
     await update.message.reply_text(
         "⚙️ *Как это работает:*\n\n"
@@ -107,7 +125,7 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         parse_mode=ParseMode.MARKDOWN,
     )
 
-    await asyncio.sleep(10)
+    await asyncio.sleep(3)
 
     await update.message.reply_text(
         "Готов? Напиши свою цель на 60 дней — одним предложением. Чем конкретнее — тем лучше.\n\n"
@@ -115,175 +133,157 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         parse_mode=ParseMode.MARKDOWN,
     )
 
-
-# ── /profile ──────────────────────────────────────────────────────────────────
-
-async def cmd_profile(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    p = db.get_user_profile(user_id)
-    if not p:
-        await update.message.reply_text(
-            "Ты ещё не в системе. Напиши /start — займёт 30 секунд."
-        )
-        return
-    await update.message.reply_text(profile_text(p), parse_mode=ParseMode.MARKDOWN)
-
-
-# ── /setname ──────────────────────────────────────────────────────────────────
-
-async def cmd_setname(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if not db.get_user(user_id):
-        await update.message.reply_text("Ты ещё не в системе. Напиши /start")
-        return
-    new_name = " ".join(ctx.args).strip() if ctx.args else ""
-    if not new_name:
-        await update.message.reply_text(
-            "Укажи новое имя: `/setname Новое имя`",
-            parse_mode=ParseMode.MARKDOWN,
-        )
-        return
-    if len(new_name) > 32:
-        await update.message.reply_text("Имя слишком длинное — максимум 32 символа.")
-        return
-    db.update_user_name(user_id, new_name)
-    await update.message.reply_text(
-        f"✅ Имя обновлено: *{new_name}*",
-        parse_mode=ParseMode.MARKDOWN,
-    )
-
-
-# ── /setgoal ──────────────────────────────────────────────────────────────────
-
-async def cmd_setgoal(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    user = db.get_user(user_id)
-    if not user:
-        await update.message.reply_text("Ты ещё не в системе. Напиши /start")
-        return
-    new_goal = " ".join(ctx.args).strip() if ctx.args else ""
-    if not new_goal:
-        await update.message.reply_text(
-            "Укажи новую цель: `/setgoal Моя новая цель`",
-            parse_mode=ParseMode.MARKDOWN,
-        )
-        return
-    if len(new_goal) > 200:
-        await update.message.reply_text("Цель слишком длинная — максимум 200 символов.")
-        return
-    old_goal = user["goal"]
-    db.update_user_goal(user_id, new_goal)
-    await update.message.reply_text(
-        f"✅ Цель обновлена:\n\n"
-        f"Было: _{old_goal}_\n"
-        f"Стало: _{new_goal}_",
-        parse_mode=ParseMode.MARKDOWN,
-    )
-    if GROUP_ID:
-        name = user["display_name"]
-        try:
-            await ctx.bot.send_message(
-                GROUP_ID,
-                f"🔄 *{name}* сменил цель.\n\n"
-                f"Новая цель: _{new_goal}_",
-                parse_mode=ParseMode.MARKDOWN,
-            )
-        except Exception as e:
-            logger.warning(f"Goal change group post failed: {e}")
-
-
-# ── /report ───────────────────────────────────────────────────────────────────
-
-async def cmd_report(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "📝 Просто напиши что сделал сегодня — текстом или фото с подписью.\n"
-        "Одно предложение — уже достаточно."
-    )
-
-
-# ── HANDLE TEXT / PHOTO ───────────────────────────────────────────────────────
+# ── ГЛАВНЫЙ ОБРАБОТЧИК СООБЩЕНИЙ ─────────────────────────────────────────────
 
 async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    msg  = update.message
     user = update.effective_user
     user_id = user.id
-    msg = update.message
 
-    # ── Игнорируем сообщения из групп — бот работает только в личке ───────
+    # Игнорируем группы
     if msg.chat.type in ("group", "supergroup", "channel"):
         return
 
-    # ── Registration flow ──────────────────────────────────────────────────
-    if user_id in REG_STATE:
-        state = REG_STATE[user_id]
-        text = (msg.text or "").strip()
+    text = (msg.text or msg.caption or "").strip()
 
-        if state["step"] == "goal":
-            if not text:
-                await msg.reply_text("Напиши цель — одним предложением 👇")
-                return
-            state["goal"] = text
-            await _finish_registration(update, ctx, user_id, user.username or "")
+    # ── Регистрация: ждём цель ────────────────────────────────────────────
+    if USER_STATE.get(user_id) == "reg_goal":
+        if not text:
+            await msg.reply_text("Напиши цель — одним предложением 👇")
             return
+        goal = text
+        name = ctx.user_data.get("reg_name", user.first_name or "Игрок")
+        USER_STATE.pop(user_id)
+        db.register_user(user_id, user.username or "", name, goal, False)
 
-        return
-
-    # ── Report flow ────────────────────────────────────────────────────────
-    existing = db.get_user(user_id)
-    if not existing:
         await msg.reply_text(
-            "Ты не в системе. Напиши /start — займёт 30 секунд."
+            f"🎮 *Игрок {name} — добро пожаловать в систему.*\n\n"
+            f"🎯 Цель: _{goal}_\n"
+            f"Начальный ранг: {rank_badge('E')}",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=MAIN_MENU,
         )
-        return
-
-    has_photo = bool(msg.photo)
-    text = msg.caption or msg.text or ""
-
-    if not text and not has_photo:
-        return
-
-    result = db.submit_report(user_id, text, has_photo)
-
-    if "error" in result:
-        if result["error"] == "already_reported":
-            await msg.reply_text(
-                "Квест сегодня уже выполнен ✅\n"
-                "Возвращайся завтра — стрик продолжается 🔥"
-            )
-        return
-
-    # ── Личка: ответ участнику ─────────────────────────────────────────────
-    reasons_str = "  |  ".join(result["reasons"])
-    await msg.reply_text(
-        f"✅ *Квест выполнен!* {reasons_str}\n"
-        f"⚡ {result['total_xp']} XP  |  🔥 Стрик: {result['streak']} дн.\n"
-        f"_{xp_to_next(result['total_xp'], result['rank'])}_\n\n"
-        "Так держать — ты на шаг ближе к своей цели 💪",
-        parse_mode=ParseMode.MARKDOWN,
-    )
-
-    if result.get("rank_up"):
         await msg.reply_text(
-            f"🆙 *РАНГ ПОВЫШЕН!*\n\n"
-            f"{RANK_EMOJI.get(result['old_rank'], '⬛')} {result['old_rank']}  →  "
-            f"{RANK_EMOJI.get(result['rank'], '⬛')} {result['rank']}\n\n"
-            "Система фиксирует твой рост. Не останавливайся.",
+            "Что дальше:\n\n"
+            "• Каждый день нажимай *📝 Отчёт* и пиши что сделал\n"
+            "• Чем дольше стрик — тем больше XP и бонусы\n"
+            "• Бот объявит о твоём прогрессе в группу\n\n"
+            "Первый квест — *сегодня* 👇",
             parse_mode=ParseMode.MARKDOWN,
         )
-
-    # ── Группа: публичный анонс ────────────────────────────────────────────
-    if GROUP_ID:
-        report_text = text if text else "📷 фото"
-        group_text = (
-            f"✅ *{result['display_name']}* {report_text}  ➕{result['xp_earned']} XP\n"
-            f"🎯 {result['goal']}  |  🔥 {result['streak']} дн. / {result['days_joined']} дн."
-        )
-        try:
-            await ctx.bot.send_message(GROUP_ID, group_text, parse_mode=ParseMode.MARKDOWN)
-        except Exception as e:
-            logger.warning(f"Group post failed: {e}")
-
-    if result.get("streak_bonus"):
         if GROUP_ID:
+            try:
+                await ctx.bot.send_message(
+                    GROUP_ID,
+                    f"🆕 *{name}* вступил в Commit Club!\n"
+                    f"🎯 Цель: _{goal}_\n\n"
+                    "Поприветствуем нового игрока 👊",
+                    parse_mode=ParseMode.MARKDOWN,
+                )
+            except Exception as e:
+                logger.warning(f"New member group post failed: {e}")
+        return
+
+    # ── Проверяем что пользователь зарегистрирован ────────────────────────
+    db_user = db.get_user(user_id)
+    if not db_user:
+        await msg.reply_text(
+            "Ты не в системе. Напиши /start — займёт 30 секунд.",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        return
+
+    # ── Обработка кнопок меню ─────────────────────────────────────────────
+    if text == "📝 Отчёт":
+        USER_STATE[user_id] = "report"
+        await msg.reply_text(
+            "Напиши что сделал сегодня — текстом или отправь фото с подписью.\n"
+            "Одно предложение — уже достаточно 👇"
+        )
+        return
+
+    if text == "👤 Профиль":
+        p = db.get_user_profile(user_id)
+        await msg.reply_text(profile_text(p), parse_mode=ParseMode.MARKDOWN)
+        return
+
+    if text == "🎯 Изменить цель":
+        USER_STATE[user_id] = "setgoal"
+        await msg.reply_text(
+            f"Текущая цель: _{db_user['goal']}_\n\n"
+            "Напиши новую цель 👇",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+
+    if text == "✏️ Изменить имя":
+        USER_STATE[user_id] = "setname"
+        await msg.reply_text(
+            f"Текущее имя: *{db_user['display_name']}*\n\n"
+            "Напиши новое имя 👇",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+
+    if text == "📞 Отметиться на созвоне":
+        USER_STATE[user_id] = "callout"
+        await msg.reply_text(
+            "Напиши код созвона 👇\n"
+            "_Код объявляется во время звонка_",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+
+    # ── Обработка ввода после кнопки ─────────────────────────────────────
+    state = USER_STATE.get(user_id)
+
+    if state == "report":
+        has_photo = bool(msg.photo)
+        if not text and not has_photo:
+            return
+        USER_STATE.pop(user_id)
+        result = db.submit_report(user_id, text, has_photo)
+
+        if "error" in result:
+            if result["error"] == "already_reported":
+                await msg.reply_text(
+                    "Квест сегодня уже выполнен ✅\n"
+                    "Возвращайся завтра — стрик продолжается 🔥",
+                    reply_markup=MAIN_MENU,
+                )
+            return
+
+        reasons_str = "  |  ".join(result["reasons"])
+        await msg.reply_text(
+            f"✅ *Квест выполнен!* {reasons_str}\n"
+            f"⚡ {result['total_xp']} XP  |  🔥 Стрик: {result['streak']} дн.\n"
+            f"_{xp_to_next(result['total_xp'], result['rank'])}_\n\n"
+            "Так держать — ты на шаг ближе к своей цели 💪",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=MAIN_MENU,
+        )
+
+        if result.get("rank_up"):
+            await msg.reply_text(
+                f"🆙 *РАНГ ПОВЫШЕН!*\n\n"
+                f"{RANK_EMOJI.get(result['old_rank'], '⬛')} {result['old_rank']}  →  "
+                f"{RANK_EMOJI.get(result['rank'], '⬛')} {result['rank']}\n\n"
+                "Система фиксирует твой рост. Не останавливайся.",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+
+        if GROUP_ID:
+            report_display = text if text else "📷 фото"
+            group_text = (
+                f"✅ *{result['display_name']}* {report_display}  ➕{result['xp_earned']} XP\n"
+                f"🎯 {result['goal']}  |  🔥 {result['streak']} дн. / {result['days_joined']} дн."
+            )
+            try:
+                await ctx.bot.send_message(GROUP_ID, group_text, parse_mode=ParseMode.MARKDOWN)
+            except Exception as e:
+                logger.warning(f"Group post failed: {e}")
+
+        if result.get("streak_bonus") and GROUP_ID:
             try:
                 await ctx.bot.send_message(
                     GROUP_ID,
@@ -293,89 +293,95 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 )
             except Exception as e:
                 logger.warning(f"Streak group post failed: {e}")
+        return
 
+    if state == "setgoal":
+        if not text:
+            await msg.reply_text("Напиши новую цель 👇")
+            return
+        if len(text) > 200:
+            await msg.reply_text("Слишком длинно — максимум 200 символов.")
+            return
+        old_goal = db_user["goal"]
+        USER_STATE.pop(user_id)
+        db.update_user_goal(user_id, text)
+        await msg.reply_text(
+            f"✅ Цель обновлена\n\n"
+            f"Было: _{old_goal}_\n"
+            f"Стало: _{text}_",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=MAIN_MENU,
+        )
+        if GROUP_ID:
+            try:
+                await ctx.bot.send_message(
+                    GROUP_ID,
+                    f"🔄 *{db_user['display_name']}* сменил цель.\n\n"
+                    f"Новая цель: _{text}_",
+                    parse_mode=ParseMode.MARKDOWN,
+                )
+            except Exception as e:
+                logger.warning(f"Goal change group post failed: {e}")
+        return
 
-# ── REGISTRATION CALLBACKS ────────────────────────────────────────────────────
+    if state == "setname":
+        if not text:
+            await msg.reply_text("Напиши новое имя 👇")
+            return
+        if len(text) > 32:
+            await msg.reply_text("Слишком длинно — максимум 32 символа.")
+            return
+        USER_STATE.pop(user_id)
+        db.update_user_name(user_id, text)
+        await msg.reply_text(
+            f"✅ Имя обновлено: *{text}*",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=MAIN_MENU,
+        )
+        return
 
-async def _finish_registration(update, ctx, user_id, tg_username):
-    state = REG_STATE.pop(user_id)
-    msg = update.message or update.callback_query.message
-
-    db.register_user(user_id, tg_username, state["name"], state["goal"], False)
-
-    await msg.reply_text(
-        f"🎮 *Игрок {state['name']} — добро пожаловать в систему.*\n\n"
-        f"🎯 Цель: _{state['goal']}_\n"
-        f"Начальный ранг: {rank_badge('E')}",
-        parse_mode=ParseMode.MARKDOWN,
-    )
-
-    await msg.reply_text(
-        "Что дальше:\n\n"
-        "• Каждый день пиши мне что сделал — текстом или фото\n"
-        "• Чем дольше стрик — тем больше XP и бонусы\n"
-        "• Бот объявит о твоём прогрессе в группу\n\n"
-        "Первый квест — *сегодня.*\n"
-        "Напиши что уже сделал или что сделаешь прямо сейчас 👇",
-        parse_mode=ParseMode.MARKDOWN,
-    )
-
-    if GROUP_ID:
-        try:
-            await ctx.bot.send_message(
-                GROUP_ID,
-                f"🆕 *{state['name']}* вступил в Commit Club!\n"
-                f"🎯 Цель: _{state['goal']}_\n\n"
-                f"Поприветствуем нового игрока 👊",
-                parse_mode=ParseMode.MARKDOWN,
+    if state == "callout":
+        if not text:
+            await msg.reply_text("Напиши код созвона 👇")
+            return
+        USER_STATE.pop(user_id)
+        if not CALLOUT_CODE["code"]:
+            await msg.reply_text(
+                "Сегодня созвона нет или код ещё не установлен.",
+                reply_markup=MAIN_MENU,
             )
-        except Exception as e:
-            logger.warning(f"New member group post failed: {e}")
-
-
-async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    # Placeholder — nickname step removed, no inline buttons in registration anymore
-    await update.callback_query.answer()
-
-
-# ── /callout ──────────────────────────────────────────────────────────────────
-
-async def cmd_callout(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    args = ctx.args
-    if not args:
-        await update.message.reply_text(
-            "Укажи код созвона: /callout КОД\n"
-            "Код объявляется во время звонка."
+            return
+        result = db.mark_callout(user_id, text, CALLOUT_CODE["code"])
+        if "error" in result:
+            errors = {
+                "wrong_code": "Неверный код. Будь внимательнее на созвоне 👀",
+                "already_marked": "Ты уже отмечен на сегодняшнем созвоне ✅",
+            }
+            await msg.reply_text(
+                errors.get(result["error"], "Ошибка"),
+                reply_markup=MAIN_MENU,
+            )
+            return
+        await msg.reply_text(
+            f"✅ Присутствие зафиксировано!\n"
+            f"+{result['xp_earned']} XP  |  Итого: {result['total_xp']} XP",
+            reply_markup=MAIN_MENU,
         )
         return
-    code = args[0].upper()
-    if not CALLOUT_CODE["code"]:
-        await update.message.reply_text(
-            "Сегодня созвона нет или код ещё не установлен."
-        )
-        return
-    result = db.mark_callout(user_id, code, CALLOUT_CODE["code"])
-    if "error" in result:
-        errors = {
-            "wrong_code": "Неверный код. Будь внимательнее на созвоне 👀",
-            "already_marked": "Ты уже отмечен на сегодняшнем созвоне ✅",
-            "not_registered": "Сначала зарегистрируйся — /start",
-        }
-        await update.message.reply_text(errors.get(result["error"], "Ошибка"))
-        return
-    await update.message.reply_text(
-        f"✅ Присутствие на созвоне зафиксировано!\n"
-        f"+{result['xp_earned']} XP  |  Итого: {result['total_xp']} XP"
+
+    # ── Неизвестное сообщение — показываем меню ───────────────────────────
+    await msg.reply_text(
+        "Используй меню ниже 👇",
+        reply_markup=MAIN_MENU,
     )
 
 
-# ── ADMIN ─────────────────────────────────────────────────────────────────────
+# ── ADMIN КОМАНДЫ ─────────────────────────────────────────────────────────────
 
 def is_admin(user_id: int) -> bool:
     return user_id in ADMIN_IDS
 
-async def cmd_set_callout(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+async def cmd_setcallout(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return
     args = ctx.args
@@ -384,15 +390,14 @@ async def cmd_set_callout(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     CALLOUT_CODE["code"] = args[0].upper()
     await update.message.reply_text(
-        f"✅ Код созвона: *{CALLOUT_CODE['code']}*\n"
-        "Скажи участникам написать /callout {код} во время звонка.",
+        f"✅ Код созвона: *{CALLOUT_CODE['code']}*",
         parse_mode=ParseMode.MARKDOWN,
     )
 
 async def cmd_remind(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return
-    await _send_reminders(ctx)
+    await _send_personal_reminders(ctx)
     await update.message.reply_text("Напоминания отправлены.")
 
 async def cmd_leaderboard(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -405,6 +410,13 @@ async def cmd_leaderboard(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         parse_mode=ParseMode.MARKDOWN,
     )
 
+async def cmd_profile(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    p = db.get_user_profile(user_id)
+    if not p:
+        await update.message.reply_text("Ты ещё не в системе. Напиши /start")
+        return
+    await update.message.reply_text(profile_text(p), parse_mode=ParseMode.MARKDOWN)
 
 # ── SCHEDULED ─────────────────────────────────────────────────────────────────
 
@@ -421,7 +433,6 @@ def _leaderboard_text(board: list) -> str:
     return "\n".join(lines)
 
 async def _send_personal_reminders(ctx: ContextTypes.DEFAULT_TYPE):
-    """14:00 KG (08:00 UTC) — короткое личное напоминание."""
     users = db.get_users_without_report()
     for u in users:
         try:
@@ -429,13 +440,11 @@ async def _send_personal_reminders(ctx: ContextTypes.DEFAULT_TYPE):
                 u["user_id"],
                 f"⚡ {u['display_name']}, квест ещё не закрыт.\n"
                 f"Стрик 🔥{u['streak']} дн. — не дай ему сгореть.",
-                parse_mode=ParseMode.MARKDOWN,
             )
         except Exception as e:
             logger.warning(f"Personal reminder failed for {u['user_id']}: {e}")
 
 async def _send_group_reminder(ctx: ContextTypes.DEFAULT_TYPE):
-    """20:00 KG (14:00 UTC) — напоминание в группу с именами."""
     if not GROUP_ID:
         return
     users = db.get_users_without_report()
@@ -473,9 +482,7 @@ async def job_daily_leaderboard(ctx: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.warning(f"Leaderboard post failed: {e}")
 
-
 async def job_weekly_leaderboard(ctx: ContextTypes.DEFAULT_TYPE):
-    """Суббота 12:00 KG (06:00 UTC) — общий рейтинг по XP."""
     if not GROUP_ID:
         return
     board = db.get_weekly_leaderboard()
@@ -506,16 +513,11 @@ def main():
 
     app = Application.builder().token(BOT_TOKEN).build()
 
-    app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(CommandHandler("profile", cmd_profile))
-    app.add_handler(CommandHandler("setname", cmd_setname))
-    app.add_handler(CommandHandler("setgoal", cmd_setgoal))
-    app.add_handler(CommandHandler("report", cmd_report))
-    app.add_handler(CommandHandler("callout", cmd_callout))
-    app.add_handler(CommandHandler("setcallout", cmd_set_callout))
-    app.add_handler(CommandHandler("remind", cmd_remind))
+    app.add_handler(CommandHandler("start",       cmd_start))
+    app.add_handler(CommandHandler("profile",     cmd_profile))
+    app.add_handler(CommandHandler("setcallout",  cmd_setcallout))
+    app.add_handler(CommandHandler("remind",      cmd_remind))
     app.add_handler(CommandHandler("leaderboard", cmd_leaderboard))
-    app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(MessageHandler(filters.TEXT | filters.PHOTO, handle_message))
 
     jq = app.job_queue
@@ -524,10 +526,10 @@ def main():
     # 20:00 KG = 14:00 UTC — напоминание в группу с именами
     # 22:00 KG = 16:00 UTC — рейтинг дня в группу
     # суббота 12:00 KG = 06:00 UTC — недельный рейтинг по XP
-    jq.run_daily(job_midday_reminder,   time=dtime(8,  0), name="midday_reminder")
-    jq.run_daily(job_evening_reminder,  time=dtime(14, 0), name="evening_reminder")
-    jq.run_daily(job_daily_leaderboard, time=dtime(16, 0), name="leaderboard")
-    jq.run_daily(job_weekly_leaderboard, time=dtime(6, 0), days=(5,), name="weekly_leaderboard")
+    jq.run_daily(job_midday_reminder,    time=dtime(8,  0), name="midday_reminder")
+    jq.run_daily(job_evening_reminder,   time=dtime(14, 0), name="evening_reminder")
+    jq.run_daily(job_daily_leaderboard,  time=dtime(16, 0), name="leaderboard")
+    jq.run_daily(job_weekly_leaderboard, time=dtime(6,  0), days=(5,), name="weekly_leaderboard")
 
     logger.info("Bot started. Polling...")
     app.run_polling(drop_pending_updates=True)
