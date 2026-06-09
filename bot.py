@@ -245,12 +245,10 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # ── Личка: ответ участнику ─────────────────────────────────────────────
     reasons_str = "  |  ".join(result["reasons"])
     await msg.reply_text(
-        f"✅ *Квест выполнен!*\n\n"
-        f"{reasons_str}\n\n"
-        f"{rank_badge(result['rank'])}\n"
-        f"⚡ {result['total_xp']} XP  |  🔮 {result['aura']} Aura\n"
-        f"🔥 Стрик: {result['streak']} дн.\n\n"
-        f"_{xp_to_next(result['total_xp'], result['rank'])}_",
+        f"✅ *Квест выполнен!* {reasons_str}\n"
+        f"⚡ {result['total_xp']} XP  |  🔥 Стрик: {result['streak']} дн.\n"
+        f"_{xp_to_next(result['total_xp'], result['rank'])}_\n\n"
+        "Так держать — ты на шаг ближе к своей цели 💪",
         parse_mode=ParseMode.MARKDOWN,
     )
 
