@@ -459,6 +459,33 @@ async def _send_group_reminder(ctx: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.warning(f"Group reminder failed: {e}")
 
+async def job_morning_penalty(ctx: ContextTypes.DEFAULT_TYPE):
+    """08:00 KG (02:00 UTC) — штраф за пропуск вчера, личное уведомление."""
+    users = db.get_users_with_active_streak()
+    for u in users:
+        result = db.penalize_missed_day(u["user_id"])
+        if "error" in result:
+            continue
+        try:
+            rank_msg = ""
+            if result["rank_down"]:
+                rank_msg = (
+                    "\n" +
+                    RANK_EMOJI.get(result["old_rank"], "⬛") + " " + result["old_rank"] +
+                    " → " +
+                    RANK_EMOJI.get(result["new_rank"], "⬛") + " " + result["new_rank"]
+                )
+            text_msg = (
+                "💔 Стрик " + str(result["old_streak"]) + " дн. сгорел.\n"
+                "−" + str(result["penalty"]) + " XP  |  Осталось: " + str(result["new_xp"]) + " XP" +
+                rank_msg + "\n\n"
+                "Сегодня новый день. Начни прямо сейчас 👇"
+            )
+            await ctx.bot.send_message(u["user_id"], text_msg)
+        except Exception as e:
+            logger.warning(f"Penalty notification failed for {u['user_id']}: {e}")
+
+
 async def job_midday_reminder(ctx: ContextTypes.DEFAULT_TYPE):
     await _send_personal_reminders(ctx)
 
@@ -555,6 +582,7 @@ def main():
     # 20:00 KG = 14:00 UTC — напоминание в группу с именами
     # 22:00 KG = 16:00 UTC — рейтинг дня в группу
     # суббота 12:00 KG = 06:00 UTC — недельный рейтинг по XP
+    jq.run_daily(job_morning_penalty,    time=dtime(2,  0), name="morning_penalty")
     jq.run_daily(job_midday_reminder,    time=dtime(8,  0), name="midday_reminder")
     jq.run_daily(job_evening_reminder,   time=dtime(14, 0), name="evening_reminder")
     jq.run_daily(job_daily_leaderboard,  time=dtime(16, 0), name="leaderboard")

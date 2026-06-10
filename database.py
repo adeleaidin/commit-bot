@@ -95,6 +95,7 @@ XP_PHOTO_BONUS = 5    # has photo
 XP_EARLY_BONUS = 5    # before 12:00 local (UTC+6 for KG, simplified as UTC here)
 XP_STREAK_7    = 50   # 7-day streak milestone
 XP_CALLOUT     = 20   # attended callout
+XP_MISS_PENALTY = 20  # penalty for missing a day
 
 
 def calc_rank(xp: int) -> str:
@@ -124,7 +125,7 @@ def register_user(user_id: int, username: str, display_name: str, goal: str, is_
 
 def submit_report(user_id: int, text: str, has_photo: bool) -> dict:
     today = date.today().isoformat()
-    now_hour = datetime.utcnow().hour  # UTC; adjust offset if needed
+    now_hour_kg = (datetime.utcnow().hour + 6) % 24  # Бишкек UTC+6
 
     with get_conn() as conn:
         existing = conn.execute(
@@ -145,7 +146,7 @@ def submit_report(user_id: int, text: str, has_photo: bool) -> dict:
             xp += XP_PHOTO_BONUS
             reasons.append(f"+{XP_PHOTO_BONUS} за фото")
 
-        if now_hour < 12:
+        if now_hour_kg < 12:
             xp += XP_EARLY_BONUS
             reasons.append(f"+{XP_EARLY_BONUS} ранний старт")
 
@@ -159,10 +160,10 @@ def submit_report(user_id: int, text: str, has_photo: bool) -> dict:
 
         new_streak = (user["streak"] + 1) if had_yesterday else 1
         streak_bonus = 0
-        if new_streak == 7:
+        if new_streak > 0 and new_streak % 7 == 0:
             streak_bonus = XP_STREAK_7
             xp += streak_bonus
-            reasons.append(f"+{XP_STREAK_7} 🔥 7-дневный стрик!")
+            reasons.append(f"+{XP_STREAK_7} 🔥 {new_streak}-дневный стрик!")
 
         new_xp = user["xp"] + xp
         new_aura = user["aura"] + xp
@@ -222,6 +223,61 @@ def mark_callout(user_id: int, code: str, expected_code: str) -> dict:
         )
         return {"xp_earned": XP_CALLOUT, "total_xp": new_xp, "display_name": user["display_name"]}
 
+
+
+def penalize_missed_day(user_id: int) -> dict:
+    """
+    Вызывается утром для тех кто не сдал отчёт вчера.
+    Списывает XP, обнуляет стрик, пересчитывает ранг.
+    Возвращает dict с результатом или {"error": ...}.
+    """
+    with get_conn() as conn:
+        user = conn.execute("SELECT * FROM users WHERE user_id=?", (user_id,)).fetchone()
+        if not user:
+            return {"error": "not_found"}
+
+        # Проверяем что вчера действительно не было отчёта
+        yesterday_str = date.fromordinal(date.today().toordinal() - 1).isoformat()
+        had_yesterday = conn.execute(
+            "SELECT id FROM reports WHERE user_id=? AND report_date=?",
+            (user_id, yesterday_str)
+        ).fetchone()
+        if had_yesterday:
+            return {"error": "no_miss"}  # вчера отчёт был, штрафовать не надо
+
+        old_streak = user["streak"]
+        if old_streak == 0:
+            # Стрик и так 0, штраф не применяем повторно
+            return {"error": "streak_already_zero"}
+
+        penalty = min(XP_MISS_PENALTY, user["xp"])  # не уходим в минус
+        new_xp = user["xp"] - penalty
+        new_aura = max(0, user["aura"] - penalty)
+        new_rank = calc_rank(new_xp)
+
+        conn.execute("""
+            UPDATE users SET xp=?, aura=?, streak=0, rank=?
+            WHERE user_id=?
+        """, (new_xp, new_aura, new_rank, user_id))
+
+        return {
+            "display_name": user["display_name"],
+            "old_streak": old_streak,
+            "penalty": penalty,
+            "new_xp": new_xp,
+            "rank_down": new_rank != user["rank"],
+            "old_rank": user["rank"],
+            "new_rank": new_rank,
+        }
+
+
+def get_users_with_active_streak() -> list:
+    """Все пользователи у кого стрик > 0 — для проверки пропуска."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT user_id, display_name, streak FROM users WHERE streak > 0"
+        ).fetchall()
+    return [dict(r) for r in rows]
 
 def get_daily_leaderboard() -> list:
     today = date.today().isoformat()
